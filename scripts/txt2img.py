@@ -15,6 +15,8 @@ import robust_eval
 import mapping_module
 
 
+# 计算解码出的秘密信息与原始秘密之间的逐比特准确率
+# 使用格雷码将数值转换为二进制，然后按位异或统计错误比特数
 def cal_acc(input, gt, gray_list, bits):
     trans_fn = np.frompyfunc(lambda x: int(gray_list[int(x)], 2), 1, 1)
     count_fn = np.frompyfunc(lambda x: bin(int(x)).count('1'), 1, 1)
@@ -28,6 +30,7 @@ def cal_acc(input, gt, gray_list, bits):
     return acc
 
 
+# 从配置文件构建模型并加载 checkpoint 权重
 def load_model_from_config(config, ckpt, gpu, verbose=False):
     print(f"Loading model from {ckpt}")
     pl_sd = torch.load(ckpt, map_location=gpu)
@@ -48,6 +51,8 @@ def load_model_from_config(config, ckpt, gpu, verbose=False):
     return model
 
 
+# 将文本提示词编码为 CLIP 条件嵌入向量
+# 返回 (条件嵌入, 无条件嵌入)，scale!=1.0 时使用无分类器引导
 def load_model_and_get_prompt_embedding(model, opt, prompts):
     if opt.scale != 1.0:
         uc = model.get_learned_conditioning(opt.n_samples * [""])
@@ -173,14 +178,14 @@ def main():
     parser.add_argument(
         "--tau_a",
         type=float,
-        help="",
+        help="low-frequency threshold for FALE mapping",
         default=0.4
     )
 
     parser.add_argument(
         "--tau_b",
         type=float,
-        help="",
+        help="high-frequency threshold for FALE mapping",
         default=0.8
     )
 
@@ -222,9 +227,24 @@ def main():
         default='ours_mapping'
     )
 
+    parser.add_argument(
+        "--block_size",
+        type=int,
+        help="block size for BICS interleaving (default 8)",
+        default=8
+    )
+
+    parser.add_argument(
+        "--mapping_bits",
+        type=int,
+        help="bits per latent element for mapping (default uses --bit_num)",
+        default=None
+    )
+
     opt = parser.parse_args()
     # seed_everything(opt.seed) # this line is for reproducible sampling or comparison
     device = torch.device(opt.gpu) if torch.cuda.is_available() else torch.device("cpu")
+    # 根据攻击类型和因子选择对应的鲁棒性测试函数
     print(opt.dpm_steps)
     os.makedirs(opt.outdir, exist_ok=True)
     outpath = opt.outdir
@@ -241,6 +261,32 @@ def main():
     bits = opt.bit_num
     gray_list = gray_code(bits)
     mapping_func = getattr(mapping_module, mapping_type)(bits=bits)
+    # Configure mapping-specific parameters
+    if mapping_type == 'bics_mapping':
+        mapping_func = mapping_module.bics_mapping(bits=bits, block_size=opt.block_size)
+    elif mapping_type == 'fale_mapping':
+        mapping_func = mapping_module.fale_mapping(bits=bits, tau_a=opt.tau_a, tau_b=opt.tau_b)
+    elif mapping_type == 'combined_mapping':
+        mapping_func = mapping_module.combined_mapping(bits=bits, block_size=opt.block_size,
+                                                       tau_a=opt.tau_a, tau_b=opt.tau_b)
+    elif mapping_type == 'icdf_mapping':
+        mapping_func = mapping_module.icdf_mapping(bits=bits, gap_start=0.4, gap_end=0.6)
+    elif mapping_type == 'ds_mapping':
+        mapping_func = mapping_module.ds_mapping(bits=bits, threshold=0.7)
+    elif mapping_type == 'hadamard_mapping':
+        mapping_func = mapping_module.hadamard_mapping(bits=bits)
+    elif mapping_type == 'multi_icdf_mapping':
+        mapping_func = mapping_module.multi_icdf_mapping(bits=min(bits, 2), gap=0.2)
+    elif mapping_type == 'rs_mapping':
+        mapping_func = mapping_module.rs_mapping(bits=bits, alpha=1.0)
+    elif mapping_type == 'mlq_rs_mapping':
+        mapping_func = mapping_module.mlq_rs_mapping(bits=min(bits, 2), alpha=0.8, beta=1.5)
+    elif mapping_type == 'rs_ecc_mapping':
+        mapping_func = mapping_module.rs_ecc_mapping(repeats=3, rs_alpha=0.8)
+    elif mapping_type == 'nd_mapping':
+        mapping_func = mapping_module.nd_mapping(bits=bits)
+    else:
+        mapping_func = getattr(mapping_module, mapping_type)(bits=bits)
 
     config = OmegaConf.load(opt.config)
     model = load_model_from_config(config, opt.ckpt, opt.gpu)
@@ -270,23 +316,27 @@ def main():
 
                 latent_shape = (batch_size, opt.C, int(height // opt.f), int(width // opt.f))
 
+                # 第一步：随机生成秘密信息并通过映射函数编码为初始潜变量
                 random_input = np.random.randint(0, 2 ** bits, latent_shape)  # 随机生成秘密信息
                 random_input_ori_sample = None
-                if mapping_func.need_uniform_sampler:
+                # 部分映射方法需要额外的均匀/高斯采样作为辅助输入
+                if mapping_func.need_uniform_sampler:  # 连续均匀分布 U(0,1)
                     random_input_ori_sample = np.random.rand(*latent_shape)
-                if mapping_func.need_gaussian_sampler:
+                if mapping_func.need_gaussian_sampler:  # 标准正态分布 N(0,1)
                     random_input_ori_sample = np.random.randn(*latent_shape)
-                if mapping_type == 'ours_mapping':
-                    seed_shuffle = np.random.randint(0, 2 ** 32, 1)
-                    seed_kernel = np.random.randint(0, 2 ** 32, 1)
+                if mapping_type in ['ours_mapping', 'bics_mapping', 'fale_mapping', 'combined_mapping',
+                                     'qr_ds_mapping', 'ds_mapping', 'hadamard_mapping']:
+                    seed_shuffle = np.random.randint(0, 2 ** 31 - 1, 1)
+                    seed_kernel = np.random.randint(0, 2 ** 31 - 1, 1)
                     random_input_args = dict(seed_kernel=seed_kernel, seed_shuffle=seed_shuffle)
                 elif mapping_type == 'tdsc_mapping':
-                    random_input_args = dict(key=np.random.randint(0, 2 ** 32, 1))
+                    random_input_args = dict(key=np.random.randint(0, 2 ** 31 - 1, 1))
                 else:
                     random_input_args = dict()
                 init_latent = mapping_func.encode_secret(secret_message=random_input, ori_sample=random_input_ori_sample, **random_input_args).astype(np.float32)
                 init_latent = torch.from_numpy(init_latent).to(device)
 
+                # 第二步：以携带秘密信息的潜变量为起点，通过 DPM-Solver++ 反向扩散生成图像
                 shape = init_latent.shape[1:]
                 z_0, _ = sampler.sample(steps=opt.dpm_gen_steps,
                                         unconditional_conditioning=uc,
@@ -304,12 +354,13 @@ def main():
                                         DPMdecode=True,
                                         )
 
+                # 将潜变量解码为像素空间图像
                 x0_samples = model.decode_first_stage(z_0)
 
-                # #  here: 已经封装了一系列的函数 用于执行相关鲁棒性测试
+                # 第三步：对生成的图像施加鲁棒性攻击（如JPEG压缩、模糊、噪声、缩放等）
                 x0_samples = attack_func(x0_samples, factor=attack_factor, tmp_image_name=tmp_image_name).to(device)
 
-                # from x0 to XT：DPM-Solver++-2
+                # 第四步：将攻击后的图像重新编码回潜空间，再通过 DPM 正向扩散反转回初始噪声
                 init_latent_hat = model.get_first_stage_encoding(model.encode_first_stage(x0_samples))
                 z_enc, _ = sampler.sample(steps=opt.dpm_inv_steps,
                                           unconditional_conditioning=uc,
@@ -329,6 +380,7 @@ def main():
                 print("encoder-decode error:", distance)
                 recon_distance = (init_latent - z_enc).abs().mean()
                 print("recon-error", recon_distance)
+                # 从反转后的噪声中解码出秘密信息，并与原始秘密计算准确率
                 pred_noise = z_enc.clone().cpu().numpy()
                 recon_latent = mapping_func.decode_secret(pred_noise=pred_noise, **random_input_args)
                 if mapping_type == 'tdsc_mapping':

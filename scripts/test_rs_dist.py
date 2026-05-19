@@ -1,0 +1,13 @@
+import numpy as np, sys; sys.path.insert(0,'..')
+import mapping_module
+rs = mapping_module.rs_mapping(bits=1, alpha=0.8, max_iter=100)
+secret = np.random.randint(0, 2, (1, 4, 64, 64)).astype(np.float64)
+encoded = rs.encode_secret(secret_message=secret)
+print(f'RS(α=0.8): mean|z|={np.abs(encoded).mean():.3f}, std={encoded.std():.3f}')
+print(f'  min|z|={np.abs(encoded).min():.3f}, max|z|={np.abs(encoded).max():.3f}')
+print(f'  % >1.0: {(np.abs(encoded) > 1.0).mean()*100:.1f}%')
+print(f'  % >2.0: {(np.abs(encoded) > 2.0).mean()*100:.1f}%')
+nd = mapping_module.nd_mapping(bits=1)
+secret2 = np.random.randint(0, 2, (1, 4, 64, 64)).astype(np.float64)
+encoded2 = nd.encode_secret(secret_message=secret2)
+print(f'ND(1bit):  mean|z|={np.abs(encoded2).mean():.3f}, unique={np.unique(encoded2)}')

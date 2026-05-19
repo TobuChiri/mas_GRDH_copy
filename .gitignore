@@ -25,3 +25,18 @@ __pycache__/
 .DS_Store        # macOS
 Thumbs.db        # Windows
 *.swp            # Vim swap files
+
+# Local model weights and generated experiment artifacts
+models/
+weights/
+scripts/tmp_*
+scripts/comp_*/
+scripts/denoise_test/
+scripts/ecc_comp*/
+scripts/ecc_comparison/
+scripts/nd_algo3/
+scripts/nd_sigma_sweep/
+scripts/rs_comparison*/
+scripts/rs_ddim*/
+ecc_comparison_hadamard/
+rs_comparison/

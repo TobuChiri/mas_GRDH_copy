@@ -69,4 +69,4 @@ model:
     cond_stage_config:
       target: ldm.modules.encoders.modules.FrozenCLIPEmbedder
       params:
-        version: /groupshare_1/huggingface/hub/models--openai--clip-vit-large-patch14
+        version: E:/code/mas_GRDH_copy/weights/clip-vit-large-patch14
