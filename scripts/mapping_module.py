@@ -1016,7 +1016,7 @@ class rs_ecc_mapping(mapping_module):
 
 
 # ============================================================
-# ND: Normal Distribution Mapping (CGIS-style)
+# Legacy exploratory ND mapping (kept for reference)
 # ============================================================
 # Directly projects binary messages into normally-distributed
 # latent variables using quantile-based encoding.
@@ -1039,7 +1039,7 @@ class rs_ecc_mapping(mapping_module):
 # ============================================================
 
 
-class nd_mapping(mapping_module):
+class nd_mapping_legacy(mapping_module):
     """
     Normal Distribution (ND) mapping — CGIS paper Algorithm 3 & 4.
 
@@ -1119,6 +1119,109 @@ class nd_mapping(mapping_module):
         # Step 6-7: li → k-bit binary → decoded value
         out = (li - 1).astype(np.float64)
         return out
+
+
+class nd_mapping(mapping_module):
+    """
+    Paper-faithful Normal Distribution (ND) mapping from CGIS Algorithm 3/4.
+
+    The paper converts plaintext m to a binary stream, divides it into k-bit
+    segments, maps each segment to an interval center in [a, b], and samples
+    y_i ~ N(mu_j, sigma^2). Decoding locates the interval containing y_i and
+    converts the recovered k-bit segment back to plaintext.
+
+    In this codebase, one latent element stores one k-bit segment as an integer
+    in [0, 2^bits - 1]. The bitstream conversion is still performed explicitly
+    so the implementation follows Algorithm 3/4 while preserving the existing
+    tensor-shaped mapping API.
+
+    Args:
+        bits: k, the number of bits per segment.
+        sigma: standard deviation; the paper denotes the variance as sigma^2.
+        a: start of the ciphertext/noise value range.
+        b: end of the ciphertext/noise value range.
+        n: number of ND intervals. For k-bit segments this must be 2^k.
+    """
+    def __init__(self, bits=1, sigma=0.5, a=-3.0, b=3.0, n=None):
+        assert 1 <= bits <= 10, "nd_mapping supports bits=1..10"
+        assert sigma >= 0, "sigma must be non-negative"
+        assert b > a, "b must be greater than a"
+        super().__init__(bits=bits)
+        self.sigma = sigma
+        self.a = a
+        self.b = b
+        self.n_intervals = 2 ** bits if n is None else int(n)
+        assert self.n_intervals == 2 ** bits, "ND requires n == 2^bits for k-bit segments"
+
+        # Paper notation: Delta = (b - a) / n.
+        self.delta = (self.b - self.a) / self.n_intervals
+
+        # Backward-compatible aliases used by exploratory scripts.
+        self.n = self.n_intervals
+        self.n_main = 1
+        self.n_sub = self.n_intervals
+        self.delta_main = self.b - self.a
+        self.delta_sub = self.delta
+
+    def _values_to_bitstream(self, values):
+        """Algorithm 3 step 2: convert plaintext segment values to bm."""
+        values = np.asarray(values)
+        rounded = np.rint(values).astype(np.int64)
+        if not np.allclose(values, rounded):
+            raise ValueError("nd_mapping expects integer k-bit segment values")
+        if rounded.size and (rounded.min() < 0 or rounded.max() >= self.n_intervals):
+            raise ValueError(f"nd_mapping values must be in [0, {self.n_intervals - 1}]")
+
+        shifts = np.arange(self.bits - 1, -1, -1, dtype=np.int64)
+        return ((rounded.reshape(-1, 1) >> shifts) & 1).astype(np.uint8).reshape(-1)
+
+    def _bitstream_to_values(self, bitstream, out_shape):
+        """Algorithm 4 steps 9-10: concatenate bm and recover segment values."""
+        bitstream = np.asarray(bitstream, dtype=np.uint8).reshape(-1)
+        if bitstream.size % self.bits != 0:
+            raise ValueError("ND bitstream length must be divisible by bits")
+
+        groups = bitstream.reshape(-1, self.bits)
+        weights = (1 << np.arange(self.bits - 1, -1, -1, dtype=np.int64))
+        values = groups.dot(weights).astype(np.float64)
+        return values.reshape(out_shape)
+
+    def encode_secret(self, secret_message, ori_sample=None, seed_kernel=None, seed_shuffle=None):
+        """
+        Algorithm 3:
+          1. Delta = (b - a) / n
+          2. Convert plaintext to binary bm
+          3. Divide bm into k-bit segments
+          4. Convert each segment to decimal d_i
+          5. Use interval index j_i = d_i + 1
+          6. mu_j = a + (j_i - 0.5) * Delta
+          7. y_i ~ N(mu_j, sigma^2)
+        """
+        out_shape = secret_message.shape
+        bm = self._values_to_bitstream(secret_message)
+        segments = bm.reshape(-1, self.bits)
+        weights = (1 << np.arange(self.bits - 1, -1, -1, dtype=np.int64))
+        d = segments.dot(weights).astype(np.float64)
+        j = d + 1.0
+        mu = self.a + (j - 0.5) * self.delta
+        out = mu + self.sigma * np.random.randn(d.size).astype(np.float64)
+        return out.reshape(out_shape)
+
+    def decode_secret(self, pred_noise, seed_kernel=None, seed_shuffle=None):
+        """
+        Algorithm 4:
+          1. Delta = (b - a) / n
+          2. For each y_i, locate j_i = floor((y_i - a) / Delta) + 1
+          3. Convert the recovered interval index to k-bit bl_i
+          4. Concatenate bl_i and recover the plaintext segment values
+        """
+        out_shape = pred_noise.shape
+        y = np.asarray(pred_noise, dtype=np.float64).reshape(-1)
+        j = np.floor((y - self.a) / self.delta).astype(np.int64) + 1
+        j = np.clip(j, 1, self.n_intervals)
+        recovered_d = (j - 1).astype(np.int64)
+        bm = self._values_to_bitstream(recovered_d)
+        return self._bitstream_to_values(bm, out_shape)
 
 
 if __name__ == '__main__':

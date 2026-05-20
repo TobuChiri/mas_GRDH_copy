@@ -241,6 +241,34 @@ def main():
         default=None
     )
 
+    parser.add_argument(
+        "--nd_sigma",
+        type=float,
+        help="ND mapping standard deviation sigma (paper variance is sigma^2)",
+        default=0.5
+    )
+
+    parser.add_argument(
+        "--nd_a",
+        type=float,
+        help="ND mapping ciphertext/noise range start",
+        default=-3.0
+    )
+
+    parser.add_argument(
+        "--nd_b",
+        type=float,
+        help="ND mapping ciphertext/noise range end",
+        default=3.0
+    )
+
+    parser.add_argument(
+        "--nd_n",
+        type=int,
+        help="ND mapping interval count n; defaults to 2^bit_num",
+        default=None
+    )
+
     opt = parser.parse_args()
     # seed_everything(opt.seed) # this line is for reproducible sampling or comparison
     device = torch.device(opt.gpu) if torch.cuda.is_available() else torch.device("cpu")
@@ -284,7 +312,9 @@ def main():
     elif mapping_type == 'rs_ecc_mapping':
         mapping_func = mapping_module.rs_ecc_mapping(repeats=3, rs_alpha=0.8)
     elif mapping_type == 'nd_mapping':
-        mapping_func = mapping_module.nd_mapping(bits=bits)
+        mapping_func = mapping_module.nd_mapping(bits=bits, sigma=opt.nd_sigma,
+                                                 a=opt.nd_a, b=opt.nd_b,
+                                                 n=opt.nd_n)
     else:
         mapping_func = getattr(mapping_module, mapping_type)(bits=bits)
 

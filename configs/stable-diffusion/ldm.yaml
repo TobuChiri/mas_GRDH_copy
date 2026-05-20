@@ -69,4 +69,4 @@ model:
     cond_stage_config:
       target: ldm.modules.encoders.modules.FrozenCLIPEmbedder
       params:
-        version: E:/code/mas_GRDH_copy/weights/clip-vit-large-patch14
+        version: C:/Users/13219/OneDrive/code/mas_GRDH_copy/weights/clip-vit-large-patch14
